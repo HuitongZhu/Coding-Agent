@@ -1,6 +1,34 @@
-.env
+# ── Python 编译产物 ──────────────────────────────────────────
 __pycache__/
-*.pyc
-.agents/
-.claude/
-skills-lock.json
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+
+# ── 环境变量 / 密钥（重要：不要提交真实 .env）──────────────
+.env
+.env.local
+*.key
+
+# ── 日志 & 运行时文件 ───────────────────────────────────────
+*.log
+logs/
+
+# ── 工作区 / 作业输出（按需提交）─────────────────────────────
+workspace/
+output/
+*.tmp
+
+# ── IDE ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ── 系统文件 ────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
