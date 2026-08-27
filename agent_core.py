@@ -16,6 +16,12 @@ from typing import Any, Optional
 import openai
 import dotenv
 
+# ── 常量 ──────────────────────────────────────────────────────
+
+# Agent 最大循环轮数，防止无限调用模型
+MAX_AGENT_ROUNDS = 8
+
+
 # ── 环境变量加载 ──────────────────────────────────────────────
 
 def load_env() -> None:
@@ -302,7 +308,7 @@ _DANGEROUS_PREFIXES: tuple[str, ...] = (
     "dd if=", "mkfs", "wget http", "curl http",
 )
 
-# 允许执行的命令前缀白名单（宽松模式：以 python / pip / node / npm / git / ls / cat / echo / mkdir / cp / mv 开头）
+# 允许执行的命令前缀白名单
 _SAFE_PREFIXES: tuple[str, ...] = (
     "python", "pip", "node", "npm", "git",
     "ls", "dir", "cat", "echo", "mkdir",
@@ -325,7 +331,7 @@ def _validate_shell_command(command: str) -> Optional[str]:
         if stripped.lower().startswith(prefix):
             return f"[run_shell 拦截] 危险命令被拒绝：{stripped}"
 
-    # 2. 白名单：仅允许安全前缀（宽松模式，可根据需要收紧）
+    # 2. 白名单：仅允许安全前缀
     matched = any(stripped.lower().startswith(p) for p in _SAFE_PREFIXES)
     if not matched:
         return (
@@ -353,7 +359,6 @@ def read_file(path: str, encoding: str = "utf-8") -> str:
     读取工作区内的文件内容。
     沙箱校验失败或 IO 异常均返回结构化错误信息。
     """
-    # 沙箱校验
     err, resolved = _assert_in_workspace(path)
     if err:
         return err
@@ -382,13 +387,11 @@ def write_file(
     写入文件内容（覆盖或追加）。
     自动创建父目录；沙箱校验失败或 IO 异常均返回结构化错误。
     """
-    # 沙箱校验
     err, resolved = _assert_in_workspace(path)
     if err:
         return err
 
     try:
-        mode = "a" if append else "w"
         resolved.parent.mkdir(parents=True, exist_ok=True)
         resolved.write_text(content, encoding=encoding, newline="")
         return f"[write_file 成功] 已写入 {resolved}（{'追加' if append else '覆盖'}）"
@@ -404,7 +407,6 @@ def run_shell(command: str, timeout: int = 30) -> str:
     执行 Shell 命令，返回合并输出与退出码。
     执行前进行安全校验（黑名单 + 白名单）；超时/异常统一转为结构化信息。
     """
-    # 安全校验
     err = _validate_shell_command(command)
     if err:
         return err
@@ -433,7 +435,7 @@ def run_shell(command: str, timeout: int = 30) -> str:
         return f"[run_shell 错误] OS 异常：{e}"
 
 
-# ── 工具调度入口 ─────────────────────────────────────────────
+# ── 工具调度 ──────────────────────────────────────────────────
 
 def invoke_tool(tool_name: str, tool_args: dict) -> str:
     """
@@ -450,3 +452,123 @@ def invoke_tool(tool_name: str, tool_args: dict) -> str:
         return f"[invoke_tool 错误] 参数不匹配：{e}"
     except Exception as e:
         return f"[invoke_tool 错误] {tool_name} 执行异常：{type(e).__name__}: {e}"
+
+
+# ── Agent 主循环 ──────────────────────────────────────────────
+
+def _print_round_log(round_num: int, heading: str, body: str = "") -> None:
+    """统一控制台日志输出格式（兼容 Windows 终端，不使用 emoji）"""
+    sep = "-" * 50
+    print(f"\n{sep}")
+    print(f"  [Round {round_num}] {heading}")
+    if body:
+        print(body)
+    print(sep)
+
+
+def run_coding_agent(user_task: str) -> str:
+    """
+    Coding Agent 主入口：ReAct 循环。
+    - 每轮调用 LLM，解析 tool_calls
+    - 有 tool_calls：分发调用本地工具，将结果追加到上下文，继续下一轮
+    - 无 tool_calls：LLM 直接给出最终回答，循环结束
+    - 最多 MAX_AGENT_ROUNDS 轮，防止无限循环
+    - 最终返回 LLM 的最终文本响应
+    """
+    _ensure_env()
+
+    # 1. 创建 OpenAI 客户端
+    client = create_client()
+
+    # 2. 构建 Agent 上下文
+    system_text = (
+        "你是一个 Coding Agent，可以在工作区内读写文件、执行命令。\n"
+        f"工作区根目录：{get_workspace()}\n"
+        "你只能在工作区目录内操作。每次拿到工具结果后，根据结果决定下一步行动。"
+        "如果任务已完成，直接输出最终答案，不要再次调用工具。"
+    )
+    context = AgentContext(system_prompt=system_text)
+    context.add_user(user_task)
+
+    # 3. 调用 LLM 时附带工具定义
+    call_kwargs: dict[str, Any] = {
+        "tools": TOOLS_SCHEMA,
+        "tool_choice": "auto",  # 允许模型自主决定是否调用工具
+    }
+
+    final_answer = ""
+
+    for round_num in range(1, MAX_AGENT_ROUNDS + 1):
+        # ── 调用 LLM ──────────────────────────────────────────
+        _print_round_log(round_num, ">> 请求 LLM")
+
+        try:
+            response = chat_completion(client, context, **call_kwargs)
+        except Exception as e:
+            err_msg = f"[Agent 错误] LLM 调用失败：{type(e).__name__}: {e}"
+            _print_round_log(round_num, "!! LLM 调用异常", err_msg)
+            return err_msg
+
+        # ── 解析工具调用 ──────────────────────────────────────
+        tool_calls = parse_tool_calls(response)
+
+        # 无工具调用 → LLM 直接回答，提取最终文本并结束
+        if not tool_calls:
+            final_answer = response.choices[0].message.content or ""
+            _print_round_log(
+                round_num,
+                ">> 任务完成（LLM 直接回答）",
+                final_answer,
+            )
+            break
+
+        # ── 打印本轮 LLM 意图 ─────────────────────────────────
+        intents = []
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "?")
+            args_str = fn.get("arguments", "")
+            try:
+                args = json.loads(args_str) if args_str else {}
+            except json.JSONDecodeError:
+                args = {"_parse_error": args_str}
+            tc_id = tc.get("id", "")
+            intents.append(f"  · {name}({args})  [id={tc_id}]")
+        _print_round_log(round_num, ">> 工具调用计划", "\n".join(intents))
+
+        # ── 将 assistant 消息（含 tool_calls）追加到上下文 ─────
+        context.add_assistant(
+            content=response.choices[0].message.content or "",
+            tool_calls=tool_calls,
+        )
+
+        # ── 分发调用工具，结果逐条追加 ────────────────────────
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            tool_name = fn.get("name", "")
+            try:
+                tool_args = json.loads(fn.get("arguments", "{}") or "{}")
+            except json.JSONDecodeError:
+                tool_args = {}
+            tc_id = tc.get("id", "")
+
+            result = invoke_tool(tool_name, tool_args)
+
+            # 将工具结果追加为 tool 消息
+            context.add_tool_result(content=result, tool_call_id=tc_id)
+
+            status = "[OK]" if not result.startswith("[错误") else "[WARN]"
+            _print_round_log(
+                round_num,
+                f"{status} 工具执行：{tool_name}",
+                result,
+            )
+
+        # 进入下一轮
+        continue
+    else:
+        # 超出最大轮数仍未收敛
+        _print_round_log(MAX_AGENT_ROUNDS, ">> 达到最大轮数，强制终止")
+        final_answer = f"[Agent 终止] 已达最大轮数（{MAX_AGENT_ROUNDS}），任务未完成。"
+
+    return final_answer
