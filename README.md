@@ -86,8 +86,8 @@ main.py                 程序入口（交互循环）
 
 ## 文件说明
 
-- `agent_core.py`（574 行）：核心模块，含上下文管理、工具定义与调度、ReAct 循环
-- `main.py`（47 行）：程序入口，交互循环
+- `agent_core.py`（621 行）：核心模块，含上下文管理、工具定义与调度、ReAct 循环
+- `main.py`（41 行）：程序入口，交互循环
 - `.env.example`：环境变量模板
 - `.gitignore`：排除 `.env`、日志、Python 编译产物
 
