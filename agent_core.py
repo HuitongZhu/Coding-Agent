@@ -524,8 +524,11 @@ def run_coding_agent(user_task: str) -> str:
     system_text = (
         "你是一个 Coding Agent，可以在工作区内读写文件、执行命令。\n"
         f"工作区根目录：{get_workspace()}\n"
-        "你只能在工作区目录内操作。每次拿到工具结果后，根据结果决定下一步行动。"
-        "如果任务已完成，直接输出最终答案，不要再次调用工具。"
+        "你只能在工作区目录内操作。\n"
+        "当前运行环境为Windows：不要使用find、ls等Unix shell命令；不要在run_shell中使用多行python‑c脚本。\n"
+        "需要读取文件内容，请优先使用read_file工具，不要尝试把大量业务逻辑写进run_shell命令。\n"
+        "如果需要批量处理文件：先用dir获取文件名列表，之后多次调用read_file读取文件。\n"
+        "拿到工具结果后，根据结果决定下一步行动。如果任务已完成，直接输出最终答案，不要再次调用工具。"
     )
     context = AgentContext(system_prompt=system_text)
     context.add_user(user_task)
