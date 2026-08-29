@@ -1,5 +1,5 @@
 """
-极简手写 Coding Agent 核心模块
+简单 Coding Agent 核心模块
 仅依赖：openai、python-dotenv
 无 agent 框架 / SDK
 """
